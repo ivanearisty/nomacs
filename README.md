@@ -1,363 +1,234 @@
-# nomacs - Image Lounge 🍸
+# nomacs — Image Lounge 🍸 (personal macOS fork)
 
-nomacs is a free, open source image viewer, which supports multiple platforms. You can use it for viewing all common image formats including RAW and psd images. nomacs is licensed under the GNU General Public License v3 and available for Windows, Linux, FreeBSD, Mac, Haiku, and OS/2.
+> This is a **personal fork** of [nomacs/nomacs](https://github.com/nomacs/nomacs).
+> The README below is trimmed down to a single thing: a **repeatable macOS (Apple
+> Silicon) build-and-install runbook** that actually produces a working, self-contained
+> `nomacs.app` in `/Applications`. It documents every fix that the upstream macOS
+> instructions are missing on a current Apple Silicon Mac (macOS 26 / Tahoe, Homebrew Qt6).
+>
+> nomacs is a free, open-source image viewer (RAW, PSD, and most common formats),
+> licensed under the **GNU General Public License v3** — see [`LICENSE`](LICENSE).
+> Upstream project: [nomacs.org](https://nomacs.org) · [GitHub](https://github.com/nomacs) · [Matrix](https://matrix.to/#/#nomacs:matrix.org).
 
-[![Build status](https://ci.appveyor.com/api/projects/status/ye6wd1hap4cebyo8?svg=true)](https://ci.appveyor.com/project/novomesk/nomacs)
-[![Downloads](https://img.shields.io/github/downloads/nomacs/nomacs/total.svg)](https://github.com/nomacs/nomacs/releases/latest)
-[![Crowdin](https://badges.crowdin.net/nomacs-neo/localized.svg)](https://crowdin.com/project/nomacs-neo)
+---
 
-## Get the Source
+## TL;DR for Claude
 
-```console
-git clone https://github.com/nomacs/nomacs.git
+If you are Claude Code running on a fresh Apple Silicon Mac and asked to "install nomacs",
+follow the **numbered steps** below top-to-bottom. They are ordered and each explains *why*
+so you can adapt if a path/version differs. The non-obvious failure modes are called out in
+**⚠️ Gotcha** blocks — those are the parts the upstream README does not cover. The end state is:
+
+- `/Applications/nomacs.app` — self-contained (embeds Qt + all deps, loads **zero** Homebrew
+  libs at runtime), runs from Finder with no quarantine prompt.
+- `build/nomacs.dmg` — a drag-install disk image of the same app.
+
+Verified working: **macOS 26 (Darwin 25.x), Apple Silicon (arm64), Homebrew Qt 6.11, nomacs 3.23**.
+
+---
+
+## 0. Prerequisites
+
+- Apple Silicon Mac (these paths assume Homebrew at `/opt/homebrew`; on Intel it's `/usr/local`).
+- Xcode **Command Line Tools** (full Xcode is *not* required): `xcode-select --install`
+- [Homebrew](https://brew.sh).
+
+## 1. Get the source (with submodules)
+
+```bash
+git clone https://github.com/ivanearisty/nomacs.git
 cd nomacs
-
-# nomacs uses submodules for third party libraries
-git submodule init
-git submodule update
+git submodule update --init --recursive   # pulls plugins + 3rd-party libs
 ```
 
-## Build nomacs (Windows)
-
-We assume you have an IDE (i.e. Visual Studio), python, git, and [Qt](https://www.qt.io/download-open-source) installed.
-
-Get all dependencies:
+## 2. Install dependencies
 
 ```bash
-git submodule init
-git submodule update
+brew install qt6 exiv2 opencv libraw quazip cmake pkg-config ninja
 ```
 
-Project folders in ``3rd-party`` will not be empty anymore. Now call:
+> `ninja` is not in the upstream list but is **required** later by `make kimageformats`.
+
+## 3. ⚠️ Gotcha — fix the Homebrew QuaZip `libbz2.tbd` link bug
+
+The Homebrew QuaZip bottle hardcodes the **build server's Xcode SDK path** for `libbz2.tbd`
+in its exported CMake target. On a Command-Line-Tools-only Mac that path does not exist, so
+`make` dies with: `No rule to make target '.../MacOSX*.sdk/usr/lib/libbz2.tbd'`.
+Replace the absolute path with a plain `bz2` link flag:
 
 ```bash
-python scripts/make.py "qtpath/bin"
+QZ=$(find /opt/homebrew/opt/quazip/lib/cmake -name 'QuaZip-Qt6_SharedTargets.cmake')
+cp -n "$QZ" "$QZ.bak"
+sed -i '' -E 's#/[^";]*MacOSX[^";]*/libbz2\.tbd#bz2#' "$QZ"
+grep -n bz2 "$QZ"   # INTERFACE_LINK_LIBRARIES should now end in ";bz2"
 ```
 
-This will build nomacs into `build/nomacs`. If you are using Visual Studio, you can then double-click `build/nomacs/nomacs.sln`. Right-click the nomacs project and choose `Set as StartUp Project`.
+*(Reverts on `brew upgrade quazip`; just re-run this if you upgrade.)*
 
-Build individual projects using:
+## 4. Configure with CMake
+
+⚠️ You **must** add OpenCV to `CMAKE_PREFIX_PATH` or configure fails with
+"Could not find OpenCVConfig.cmake".
 
 ```bash
-python scripts/make.py "qt/bin" --project quazip,libraw --force
+mkdir -p build && cd build
+CMAKE_PREFIX_PATH="/opt/homebrew/opt/qt6/lib/cmake:/opt/homebrew/opt/opencv/lib/cmake/opencv4" \
+  cmake -D ENABLE_QUAZIP=ON ../ImageLounge
 ```
 
-### Developer Build
+You should see a summary with `OPENCV … YES`, `LIBRAW … YES`, `QuaZip … YES`.
 
-I like having a separate developer build (without submodules) that uses 3rd party libs already compiled. To do so you need to:
+## 5. Build
 
 ```bash
-git submodule update --init --remote scripts 
-
-# python scripts/make.py "C:\Qt\Qt-5.14.1-installer\5.14.2\msvc2017_64\bin" --lib-path C:\coding\nomacs\nomacs\3rd-party\build
-python scripts/make.py "qt/bin" --lib-path "nomacs/3rd-party/build"
+make -j$(sysctl -n hw.ncpu)
 ```
 
-### If anything did not work
-
-- check if you have setup opencv (otherwise uncheck ENABLE_OPENCV)
-- check if your Qt is set correctly (otherwise set the path to `qt_install_dir/qtbase/bin/qmake.exe`)
-- check if your builds proceeded correctly
-
-## Build nomacs (Linux/Unix)
-
-Before you build nomacs, please note the following:
-
-- Nomacs requires using Qt6.
-- [kimageformats-plugins]([https://github.com/KDE/kimageformats](https://invent.kde.org/frameworks/kimageformats)) is an optional dependency that provides additional formats such as AVIF, HEIC/HEIF, and JPEG XL/JXL. The Qt version of the plugins should match the Qt version when compiling nomacs.
-- Zip file support requires Quazip, which has varied support in distributions. If the system package is missing or does not work, you can set `USE_SYSTEM_QUAZIP=NO` to use the version in nomacs/3rdparty. However, you may also need to remove the any system quazip development package temporarily. (such as `llibquazip*-dev` for Ubuntu)
-
-### Get the required packages
-
-The package lists and cmake configuration listed below enable all features in nomacs, which we recommend. However, if you do not want a particular feature you can omit certain packages.
-
-#### Build options and their dependencies
-
-This is the list of configurable packages and what they provide in nomacs. To ensure a feature is included/excluded set the cmake option for that feature. By default, all features are enabled if the dependencies are found when running cmake**.
-
-The following Qt components are necessary: Core, Concurrent, Network, PrintSupport, SVG, Widgets, Core5Compat.
-
-There are other optional features that can be enabled during build:
-
-| Option             | Depends on     | Requires        | Description
-| ------------------ | -------------- | --------------- | -
-| `ENABLE_RAW`       | LibRAW         | `ENABLE_OPENCV` | Enables reading RAW images
-| `ENABLE_TIFF`      | LibTiff        | `ENABLE_OPENCV` | Enable reading multi-page TIFF
-| `ENABLE_QUAZIP`    | Quazip**       |                 | Enable reading from zip files
-| `ENABLE_OPENCV`    | OpenCV         |                 | RAW, TIFF, Adjustments, High-quality thumbnails, DRIF files, histogram, mosaic
-| `ENABLE_PLUGINS`   | nomacs/plugins | `ENABLE_OPENCV` | Paint on image, Composite, Affine Transform, Fake Miniatures, Page Extraction
-| `ENABLE_TESTING`   | GoogleTest     |                 | Enables `make check` target for unit testing
-
-(**) Quazip is not enabled by default as of nomacs 3.19.1
-
-#### Runtime dependencies
-
-Additional packages will be used by nomacs if they are available at runtime, and they use the same Qt version as nomacs (5 or 6).
-
-- QImageFormats: Enables reading ICNS, MNG, TGA, TIFF, WBMP, WEBP
-- KImageFormats: Enables reading AVIF, HEIF/HEIC, JXL, EXR, EPS and [more](https://github.com/KDE/kimageformats)
-
-#### Ubuntu 24.04
-
-```console
-sudo apt install qt6-base-dev qt6-tools-dev qt6-svg-dev qt6-image-formats-plugins libexiv2-dev libraw-dev libopencv-dev libtiff-dev libtiff-dev libquazip1-qt6-dev build-essential git cmake lcov libgtest-dev
-```
-
-#### Ubuntu 22.04
-
-```console
-sudo apt install qt6-base-dev qt6-tools-dev qt6-tools-dev-tools libqt6svg6-dev libqt6core5compat6-dev qt6-l10n-tools qt6-image-formats-plugins libexiv2-dev libraw-dev libopencv-dev libtiff-dev libtiff-dev build-essential git cmake lcov libgtest-dev libgl-dev
-```
-
-#### Arch
-
-```console
-# qt6
-sudo pacman -S qt6-base qt6-imageformats qt6-svg qt6-tools quazip-qt6 exiv2 libraw libtiff opencv kimageformats git cmake gtest base-devel
-```
-
-#### Redhat/Fedora/CentOS (tested on Rocky 9.5)
-
-```console
-sudo dnf install qt6-qtbase-devel qt6-qtimageformats qt6-qtsvg-devel qt6-qttools-devel qt6-qt5compat-devel LibRaw-devel opencv-devel exiv2-devel libtiff-devel git cmake lcov gtest-devel gcc-c++
-```
-
-#### FreeBSD (14.2 release)
-
-```console
-sudo pkg install qt6-base qt6-imageformats qt6-svg qt6-5compat qt6-tools quazip-qt6 tiff exiv2 kf6-kimageformats libraw opencv git cmake googletest gcc
-```
-
-#### Haiku (r1 beta 5)
-
-```console
-# qt6
-pkgman install qt6_base_devel qt6_tools_devel qt6_svg_devel qt6_5compat_devel quazip1_qt6_devel tiff_devel libraw_devel opencv_devel gtest_devel exiv2_devel kimageformats6 qt6_imageformats cake git gcc make pkgconfig lcms_devel
-```
-
-### Configure nomacs
-
-Nomacs is configured with cmake. These cmake options are often needed:
-
-- ENABLE_QUAZIP=[ON|OFF] - Default OFF
-- USE_SYSTEM_QUAZIP=[ON|OFF] - Default ON
-- CMAKE_BUILD_TYPE=[Debug|Release|RelWithDebInfo] - For normal usage, choose `RelWithDebInfo`. For development, `Debug` builds have more logging as well as debug symbols.
-
-```console
-cd nomacs
-mkdir build
-cd build
-cmake ../ImageLounge
-```
-
-### Compile nomacs
-
-```console
-make [-j 8]
-```
-
-You will now have a binary (~/nomacs/build/nomacs), which you can use directly, however you may need to set LD_LIBRARY_PATH for this to work. You can check the log output to see that nomacs is loading configuration files from the expected locations.
-
-```console
-# running nomacs from ~/nomacs/build/
-LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH ./nomacs
-```
-
-## Build and run tests
-
-Nomacs uses [GoogleTest](https://github.com/google/googletest), which is included in the package lists above. A `check` target will be created if GoogleTest is present. To build and run tests:
+Quick smoke test (a window should open; Ctrl-C / quit to exit):
 
 ```bash
-make check
+./nomacs.app/Contents/MacOS/nomacs    # logs to stdout
 ```
 
-### Install nomacs
+## 6. Extra image formats — build kimageformats (JXL, JP2, AVIF, JXR, Krita, …)
 
-By default nomacs is installed to /usr/local/ unless you set `CMAKE_INSTALL_PREFIX`
+Homebrew has no `kimageformats` package, so nomacs builds it from source. ⚠️ The bundled
+`build-kif.sh` hardcodes `cmake -G Ninja` and needs `CMAKE_PREFIX_PATH` exported, or it fails
+with "unable to find Ninja" / "CMAKE_C_COMPILER not set":
 
-```console
-sudo make install
-# ldconfig is required on most linux distros
-# Some systems you also require changes to 
-# `/etc/ld.so.conf` to add `/usr/local/lib` 
-sudo ldconfig
+```bash
+CMAKE_PREFIX_PATH="/opt/homebrew/opt/qt6/lib/cmake:/opt/homebrew" \
+  make kimageformats
 ```
 
-### For Package Maintainers
+It auto-`brew install`s the codec deps (libavif, jpeg-xl, jxrlib, karchive, …) and installs
+`kimg_*.dylib` plugins into Qt's `imageformats` dir. HEIF is intentionally skipped (macOS/Qt
+provide HEIC natively).
 
-- Highly recommended optional dependency: nomacs officially supported [plugins](https://github.com/nomacs/nomacs-plugins/), provide core features like paint-on-image. Enabled by default if `nomacs/ImageLounge/plugins` submodule is present.
-- Recommended optional dependency: qt-imageformats-plugins provides WEBP and many more formats
-- Recommended optional dependency: quazip provides support for reading images from zip files (with `ENABLE_QUAZIP=ON`). In the unlikely case there is a conflict with the quazip package, you may use 3rdparty/quazip with `USE_SYSTEM_QUAZIP=OFF`.
-- Recommended optional dependency: kimageformats provides AVIF, HEIF/HEIC, JXL and many more formats.
-- Recommended build dependency: gtest so you may run `make check` to validate the build
-- Ensure `ENABLE_TRANSLATIONS` is `ON` (default: `ON`)
-- Nomacs only requires the opencv-core and opencv-imgproc components at runtime, not the full opencv suite. This will save substantial space when installing nomacs.
+## 7. ⚠️ Gotcha — remove the crash-prone Qt jpeg2000 plugin (#1307)
 
-## Build nomacs (MacOS)
+Homebrew's jasper-based `libqjp2.dylib` crashes nomacs when opening `.jp2`. kimageformats'
+OpenJPEG-based `kimg_jp2.dylib` (installed in step 6) replaces it. You must delete the dylib
+**and** its CMake files together, or cmake later fails:
 
-Install [Homebrew](http://brew.sh/) for easier installation of dependencies.
-Install required dependencies:
-
-```console
-brew install qt6 exiv2 opencv libraw quazip cmake pkg-config
+```bash
+BK="$HOME/.nomacs-qt-jp2-backup"; mkdir -p "$BK"
+QTPLUG=/opt/homebrew/opt/qt6/share/qt/plugins/imageformats
+QTCMK=/opt/homebrew/opt/qt6/lib/cmake/Qt6Gui
+mv "$QTPLUG/libqjp2.dylib" "$BK/" 2>/dev/null
+mv "$QTCMK"/Qt6QJp2Plugin*.cmake "$BK/" 2>/dev/null
+# restore later with: brew reinstall qtimageformats   (or move files back from $BK)
 ```
 
-Go to the `nomacs` directory and run the correct cmake for your hardware and Qt version. We recommend Qt6.
+## 8. Register file types, then rebuild
 
-```console
-cd nomacs; mkdir build; cd build
+This writes the supported-format list (now including JXL/JP2/AVIF/etc.) into `Info.plist`,
+which is what enables Finder open-with / drag-and-drop.
 
-# Qt6 / Intel 
-CMAKE_PREFIX_PATH=/usr/local/opt/qt6/lib/cmake cmake -D ENABLE_QUAZIP=ON ../ImageLounge
-
-# Qt6 / Apple Silicon
-CMAKE_PREFIX_PATH=/opt/homebrew/opt/qt6/lib/cmake cmake -D ENABLE_QUAZIP=ON ../ImageLounge
-```
-
-Run make:
-
-```console
-make
-```
-
-You will now have a binary (`nomacs.app`), which you can test (or use directly):
-
-```console
-# simulate opening from Finder
-open nomacs.app
-
-# to see logging
-./nomacs.app/Contents/MacOS/nomacs
-```
-
-Homebrew seems to be missing kimageformats so we haves this option until that happens:
-
-```console
-make kimageformats
-```
-
-Nomacs registers supported file types via the Info.plist file in the app bundle. This is essential for open-with, drag-and-drop, etc features of the Finder. Supported types vary depending on what options to cmake, Qt and OS version, homebrew configuration, and even nomacs user-specified custom file types (via `Tools/Add Image Format`).
-
-Note that nomacs does not automatically make itself the default application for any supported types at this time, you will need to you use the open-with function in "Get Info" etc.
-
-To ensure it is correct for the current build, run
-
-```console
+```bash
+# re-run configure first since step 7 removed the QJp2 cmake files
+CMAKE_PREFIX_PATH="/opt/homebrew/opt/qt6/lib/cmake:/opt/homebrew/opt/opencv/lib/cmake/opencv4" \
+  cmake -D ENABLE_QUAZIP=ON ../ImageLounge
+make -j$(sysctl -n hw.ncpu)
 make filetypes
-make
+make -j$(sysctl -n hw.ncpu)
 ```
 
-When you are satisfied and want to install it to `/Applications`, use:
+> nomacs does **not** auto-register as the default app for any type. Set it per-type in Finder:
+> **Get Info → Open With → nomacs → Change All**.
 
-```console
-sudo make install
-```
-
-If you want a self-contained bundle (`nomacs.app`) and dmg file (`nomacs.dmg`) that can't be broken by homebrew updates, use:
-
-```console
-make bundle
-```
-
-If macdeployqt complains about `ERROR: Cannot resolve rpath "@rpath/QtGui.framework/Versions/A/QtGui"` [here](https://github.com/orgs/Homebrew/discussions/2823#discussioncomment-2010340) is the solution:
-
-```console
-cd /usr/local/lib/QtGui.framework/Versions/A
-install_name_tool -id '@rpath/QtGui.framework/Versions/A/QtGui' QtGui
-otool -L QtGui | head -2
-QtGui:
-        @rpath/QtGui.framework/Versions/A/QtGui (compatibility version 6.0.0, current version 6.7.0)
-```
-
-## Build nomacs (Windows Cross-Compile)
-
-Compiles nomacs for Windows using M Cross Environment (MXE) from a Linux/Unix host.
-
-MXE environment is usually compiled from source, however you may be able to skip this if MXE has packages for your platform:
+## 9. Build the self-contained bundle + dmg
 
 ```bash
-git clone <mxe url>
-cd mxe
-
-# qt6 (quazip-qt6 is unavailable)
-make MXE_TARGETS='x86_64-w64-mingw32.shared' qt6-qtbase qt6-qtimageformats qt6-qttools qt6-qt5compat opencv tiff exiv2 libraw
+make bundle    # runs macdeployqt; produces nomacs.app + nomacs.dmg
 ```
 
-Setup build environment:
+⚠️ macdeployqt prints `Cannot resolve rpath "@rpath/lib*Plugin.3.dylib"` for the optional
+nomacs plugins — that is **non-fatal**, those plugins are copied in separately.
+
+## 10. ⚠️ Gotcha — fix the OpenMP double-load crash (OMP Error #15), then re-sign
+
+The bundle from step 9 **crashes on launch**:
+`OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized.`
+
+Cause: macdeployqt leaves stale `/opt/homebrew/...` and build-dir `LC_RPATH`s on the OpenCV /
+nomacsCore / plugin dylibs. So `@rpath/libopencv_core.413.dylib` resolves to the **Homebrew**
+OpenCV, which drags in a *second* `openblas → libomp` stack → two OpenMP runtimes → abort.
+
+Fix: strip every stale rpath, add bundle-relative `@loader_path`, then re-sign ad-hoc
+(mandatory on arm64 — editing load commands invalidates the signature). Save this as
+`fix-bundle.sh` and run it from the `build` dir:
 
 ```bash
-export MXE_DIR=~/mxe
-export MXE_TARGET=x86_64-w64-mingw32.shared
-export PATH="${MXE_DIR}/usr/bin:$PATH"
+#!/bin/bash
+set -uo pipefail
+APP="$(pwd)/nomacs.app"; cd "$APP/Contents"
+BAD='^/opt/homebrew|^/Users/.*/WorkDir|/kimageformats/build|/build/libs$'
+rpaths() { otool -l "$1" 2>/dev/null | awk '/ LC_RPATH$/{g=1} g&&/ path /{print $2; g=0}'; }
 
-alias pkg-config=${MXE_TARGET}-pkg-config
-alias qmake=${MXE_TARGET}-qmake
-alias cmake=${MXE_TARGET}-cmake
+find . -type f | while IFS= read -r f; do
+  file "$f" 2>/dev/null | grep -q Mach-O || continue
+  case "$f" in
+    ./MacOS/*)      want='@executable_path/../Frameworks' ;;
+    ./Frameworks/*) want='@loader_path' ;;
+    ./PlugIns/*)    want='@loader_path/../../Frameworks' ;;
+    *)              want='@loader_path' ;;
+  esac
+  rpaths "$f" | grep -E "$BAD" | while IFS= read -r rp; do
+    install_name_tool -delete_rpath "$rp" "$f" 2>/dev/null
+  done
+  rpaths "$f" | grep -Fxq "$want" || install_name_tool -add_rpath "$want" "$f" 2>/dev/null
+done
+
+# re-sign inside-out (ad-hoc)
+find Frameworks PlugIns -name '*.dylib' -type f -exec codesign --force --sign - --timestamp=none {} \;
+find Frameworks -maxdepth 1 -name '*.framework' -exec codesign --force --sign - --timestamp=none {} \;
+cd "$APP/.."; codesign --force --sign - --timestamp=none nomacs.app
+codesign --verify --deep nomacs.app && echo "signature OK"
 ```
-
-Run cmake out-of-tree:
 
 ```bash
-mkdir build-nomacs
-cd build-nomacs
-
-cmake -D ENABLE_TRANSLATIONS=ON -D ENABLE_HEIF=ON -D ENABLE_AVIF=ON  \
--DENABLE_JXL=ON -D USE_SYSTEM_QUAZIP=OFF <nomacs-path>/ImageLounge
+bash fix-bundle.sh
 ```
 
-Compile nomacs:
+Verify the crash is gone (should print exactly one libomp, from inside the bundle, and no
+`/opt/homebrew` libs at runtime):
 
 ```bash
-make -j8
-make collect
+DYLD_PRINT_LIBRARIES=1 ./nomacs.app/Contents/MacOS/nomacs 2>&1 | grep -i libomp | sort -u
 ```
 
-Run on WINE:
+## 11. Install to /Applications
 
 ```bash
-wine nomacs-mingw/nomacs.exe
+rm -rf /Applications/nomacs.app
+cp -R nomacs.app /Applications/
+open /Applications/nomacs.app      # Finder-style launch
 ```
 
-Run on Windows:
+Because the app is locally built it carries no quarantine attribute, so Gatekeeper opens it
+normally even though it's ad-hoc signed (not notarized).
 
-```console
-cd C:\
-xcopy /DEY <shared-folder>\build-nomacs\nomacs-mingw nomacs
-cd nomacs
-nomacs.exe
-```
+## 12. (optional) Rebuild a clean dmg from the fixed app
 
-## Build nomacs (Windows with MSYS2)
+The `nomacs.dmg` produced in step 9 is from *before* the rpath fix; regenerate it:
 
 ```bash
-export target=mingw-w64-x86_64
-
-pacman -S $target-qt6-base $target-qt6-svg $target-qt6-tools \
-          $target-libraw $target-libtiff $target-exiv2 $target-opencv $target-cmake $target-gcc
-
-export PATH=/ming64:$PATH
-
-cd <build-dir>
-
-cmake -D ENABLE_TRANSLATIONS=ON -D USE_SYSTEM_QUAZIP=ON <nomacs-dir>/ImageLounge
-
-cmake --build . --parallel 8
+STAGE=$(mktemp -d); cp -R nomacs.app "$STAGE/"; ln -s /Applications "$STAGE/Applications"
+rm -f nomacs.dmg
+hdiutil create -volname nomacs -srcfolder "$STAGE" -ov -format UDZO nomacs.dmg
+rm -rf "$STAGE"
 ```
 
-## Enable Debug output
+---
 
-To enable Qt debug messages set
+## Result
 
-```bash
-cmake -D CMAKE_BUILD_TYPE=Debug ...
-```
-
-at the Makefiles generation phase.
-
-## Links
-
-- [nomacs.org](https://nomacs.org)
-- [GitHub](https://github.com/nomacs)
-- [Matrix chat room](https://matrix.to/#/#nomacs:matrix.org)
+| Format source | Provides |
+| ------------- | -------- |
+| OpenCV + LibRaw | RAW (CR2/NEF/DNG…), high-quality thumbnails, adjustments |
+| QuaZip | reading images inside `.zip` |
+| Qt imageformats | TIFF, WEBP, ICNS, TGA, … |
+| kimageformats | JPEG XL, JPEG 2000, AVIF, JPEG XR, EXR, Krita, OpenRaster, QOI, … |
 
 [![nomacs-icon](https://nomacs.org/nomacs.svg)](https://nomacs.org)
